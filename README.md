@@ -1,8 +1,3 @@
-Sure — here’s the same content formatted **exactly as a `README.md` file** (you can copy-paste directly into your project root):
-
----
-
-```markdown
 # Intelligent Carbon Emission Management System (Frontend)
 
 A modern **Expo React Native** application that helps organizations **monitor, visualize, and forecast** their carbon emissions.  
@@ -62,7 +57,7 @@ It features dashboards, analytics, and visualization tools for tracking emission
 ┣ 📜 package.json
 ┗ 📜 README.md
 
-````
+```
 
 ---
 
@@ -72,7 +67,7 @@ It features dashboards, analytics, and visualization tools for tracking emission
    ```bash
    git clone https://github.com/your-username/ICEMS-Frontend.git
    cd ICEMS-Frontend
-````
+   ```
 
 2. **Install dependencies**
 
