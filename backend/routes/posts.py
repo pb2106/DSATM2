@@ -1,70 +1,56 @@
-from flask import Blueprint, request, jsonify
-from flask_jwt_extended import jwt_required, get_jwt_identity
-from database import db
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, desc
+from database import get_db
+from models.user import User
 from models.post import Post
-from models.behavioral_data import BehavioralData
-from datetime import datetime
+from schemas import PostCreate, PostResponse
+from utils.auth import get_current_active_user
 
-posts_bp = Blueprint('posts', __name__, url_prefix='/api/posts')
+router = APIRouter()
 
-@posts_bp.route('', methods=['GET'])
-@jwt_required()
-def get_posts():
-    try:
-        posts = Post.query.order_by(Post.created_at.desc()).limit(50).all()
-        return jsonify({'posts': [post.to_dict() for post in posts]}), 200
-    except Exception as e:
-        print(f"Get posts error: {e}")
-        return jsonify({'error': str(e)}), 500
+@router.get("", response_model=dict)
+async def get_posts(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_active_user)):
+    result = await db.execute(
+        select(Post).order_by(desc(Post.created_at)).limit(50)
+    )
+    posts = result.scalars().all()
+    
+    return {"posts": [post.to_dict() for post in posts]}
 
-@posts_bp.route('', methods=['POST'])
-@jwt_required()
-def create_post():
-    try:
-        user_id_str = get_jwt_identity()
-        user_id = int(user_id_str)  # Convert to int for database
-        data = request.get_json()
-        
-        if not data.get('content'):
-            return jsonify({'error': 'Content is required'}), 400
-        
-        # Capture behavioral data if provided
-        if data.get('behavioral_data'):
-            behavioral_data = BehavioralData(
-                user_id=user_id,
-                session_id=data['behavioral_data'].get('session_id'),
-                typing_speed=data['behavioral_data'].get('typing_speed'),
-                device_fingerprint=data['behavioral_data'].get('device_fingerprint'),
-                ip_address=request.remote_addr,
-                access_time=datetime.utcnow()
-            )
-            db.session.add(behavioral_data)
-        
-        post = Post(
-            user_id=user_id,
-            content=data['content']
-        )
-        db.session.add(post)
-        db.session.commit()
-        
-        return jsonify({'post': post.to_dict()}), 201
-    except Exception as e:
-        db.session.rollback()
-        print(f"Create post error: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+@router.post("", response_model=dict)
+async def create_post(
+    post_data: PostCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    # Note: behavioral_data is received but not stored in database
+    # It can be analyzed in-memory if needed for security purposes
+    
+    post = Post(
+        user_id=current_user.id,
+        content=post_data.content
+    )
+    
+    db.add(post)
+    await db.commit()
+    await db.refresh(post)
+    
+    return {"post": post.to_dict()}
 
-@posts_bp.route('/<int:post_id>/like', methods=['POST'])
-@jwt_required()
-def like_post(post_id):
-    try:
-        post = Post.query.get_or_404(post_id)
-        post.likes += 1
-        db.session.commit()
-        
-        return jsonify({'likes': post.likes}), 200
-    except Exception as e:
-        db.session.rollback()
-        print(f"Like post error: {e}")
-        return jsonify({'error': str(e)}), 500
+@router.post("/{post_id}/like", response_model=dict)
+async def like_post(
+    post_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    result = await db.execute(select(Post).where(Post.id == post_id))
+    post = result.scalar_one_or_none()
+    
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    
+    post.likes += 1
+    await db.commit()
+    
+    return {"likes": post.likes}

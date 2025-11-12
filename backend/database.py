@@ -1,10 +1,33 @@
-from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import declarative_base
+from config import settings
 
-db = SQLAlchemy()
+# Convert postgresql:// to postgresql+asyncpg://
+DATABASE_URL = settings.DATABASE_URL.replace('postgresql://', 'postgresql+asyncpg://')
 
-def init_db(app):
-    db.init_app(app)
-    with app.app_context():
-        db.create_all()
-        print("Database tables created successfully!")
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=True,
+    pool_pre_ping=True,
+    pool_recycle=300,
+)
+
+async_session_maker = async_sessionmaker(
+    engine,
+    class_=AsyncSession,
+    expire_on_commit=False
+)
+
+Base = declarative_base()
+
+async def init_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    print("✅ Database tables created successfully!")
+
+async def get_db():
+    async with async_session_maker() as session:
+        try:
+            yield session
+        finally:
+            await session.close()

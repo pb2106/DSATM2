@@ -1,85 +1,103 @@
-from flask import Blueprint, request, jsonify
-from flask_jwt_extended import jwt_required, get_jwt_identity
-from database import db
-from models.message import Message
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, or_, and_, distinct
+from database import get_db
 from models.user import User
+from models.message import Message
+from schemas import MessageCreate, MessageResponse, ConversationUser
+from utils.auth import get_current_active_user
 
-messages_bp = Blueprint('messages', __name__, url_prefix='/api/messages')
+router = APIRouter()
 
-@messages_bp.route('/conversations', methods=['GET'])
-@jwt_required()
-def get_conversations():
-    try:
-        user_id = get_jwt_identity()
-        
-        # Get unique users the current user has chatted with
-        sent_to = db.session.query(Message.receiver_id).filter(Message.sender_id == user_id).distinct()
-        received_from = db.session.query(Message.sender_id).filter(Message.receiver_id == user_id).distinct()
-        
-        user_ids = set([u[0] for u in sent_to] + [u[0] for u in received_from])
-        users = User.query.filter(User.id.in_(user_ids)).all() if user_ids else []
-        
-        return jsonify({
-            'conversations': [{'id': u.id, 'name': u.name, 'avatar': u.avatar} for u in users]
-        }), 200
-    except Exception as e:
-        print(f"Conversations error: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e), 'conversations': []}), 200
+@router.get("/conversations", response_model=dict)
+async def get_conversations(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    # Get unique user IDs from sent and received messages
+    sent_query = select(distinct(Message.receiver_id)).where(Message.sender_id == current_user.id)
+    received_query = select(distinct(Message.sender_id)).where(Message.receiver_id == current_user.id)
+    
+    sent_result = await db.execute(sent_query)
+    received_result = await db.execute(received_query)
+    
+    sent_ids = set(sent_result.scalars().all())
+    received_ids = set(received_result.scalars().all())
+    user_ids = sent_ids.union(received_ids)
+    
+    if not user_ids:
+        return {"conversations": []}
+    
+    # Get user details
+    users_result = await db.execute(select(User).where(User.id.in_(user_ids)))
+    users = users_result.scalars().all()
+    
+    return {
+        "conversations": [
+            {"id": u.id, "name": u.name, "avatar": u.avatar}
+            for u in users
+        ]
+    }
 
-@messages_bp.route('/<int:receiver_id>', methods=['GET'])
-@jwt_required()
-def get_messages(receiver_id):
-    try:
-        user_id = get_jwt_identity()
-        
-        messages = Message.query.filter(
-            db.or_(
-                db.and_(Message.sender_id == user_id, Message.receiver_id == receiver_id),
-                db.and_(Message.sender_id == receiver_id, Message.receiver_id == user_id)
+@router.get("/{receiver_id}", response_model=dict)
+async def get_messages(
+    receiver_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    # Get all messages between current user and receiver
+    result = await db.execute(
+        select(Message).where(
+            or_(
+                and_(Message.sender_id == current_user.id, Message.receiver_id == receiver_id),
+                and_(Message.sender_id == receiver_id, Message.receiver_id == current_user.id)
             )
-        ).order_by(Message.created_at).all()
-        
-        # Mark messages as read
-        Message.query.filter(
-            Message.sender_id == receiver_id,
-            Message.receiver_id == user_id,
-            Message.is_read == False
-        ).update({'is_read': True})
-        db.session.commit()
-        
-        return jsonify({
-            'messages': [msg.to_dict(user_id) for msg in messages]
-        }), 200
-    except Exception as e:
-        print(f"Get messages error: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-@messages_bp.route('', methods=['POST'])
-@jwt_required()
-def send_message():
-    try:
-        user_id = get_jwt_identity()
-        data = request.get_json()
-        
-        if not data.get('receiver_id') or not data.get('text'):
-            return jsonify({'error': 'receiver_id and text are required'}), 400
-        
-        message = Message(
-            sender_id=user_id,
-            receiver_id=data['receiver_id'],
-            text=data['text']
+        ).order_by(Message.created_at)
+    )
+    messages = result.scalars().all()
+    
+    # Mark messages as read
+    unread_result = await db.execute(
+        select(Message).where(
+            and_(
+                Message.sender_id == receiver_id,
+                Message.receiver_id == current_user.id,
+                Message.is_read == False
+            )
         )
-        db.session.add(message)
-        db.session.commit()
-        
-        return jsonify({'message': message.to_dict(user_id)}), 201
-    except Exception as e:
-        db.session.rollback()
-        print(f"Send message error: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+    )
+    unread_messages = unread_result.scalars().all()
+    
+    for msg in unread_messages:
+        msg.is_read = True
+    
+    await db.commit()
+    
+    return {
+        "messages": [msg.to_dict(current_user.id) for msg in messages]
+    }
+
+@router.post("", response_model=dict)
+async def send_message(
+    message_data: MessageCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    # Check if receiver exists
+    result = await db.execute(select(User).where(User.id == message_data.receiver_id))
+    receiver = result.scalar_one_or_none()
+    
+    if not receiver:
+        raise HTTPException(status_code=404, detail="Receiver not found")
+    
+    message = Message(
+        sender_id=current_user.id,
+        receiver_id=message_data.receiver_id,
+        text=message_data.text
+    )
+    
+    db.add(message)
+    await db.commit()
+    await db.refresh(message)
+    
+    return {"message": message.to_dict(current_user.id)}
